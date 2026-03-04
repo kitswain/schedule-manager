@@ -1,0 +1,38 @@
+team_id,division_code,draft_slot,coach_last_name,team_nickname,team_display_name,is_active
+B1-01,B1,1,VILLAVICENCIO,Hustle,01 - VILLAVICENCIO Hustle,1
+B1-02,B1,2,HAFIF,The Fab9,02 - HAFIF The Fab9,1
+B1-03,B1,3,RAGGUETTE,Night City,03 - RAGGUETTE Night City,1
+B1-04,B1,4,SWAIN,Floor Burns,04 - SWAIN Floor Burns,1
+B1-05,B1,5,TAYLOR,Swish,05 - TAYLOR Swish,1
+B1-06,B1,6,GONZALEZ,RWE,06 - GONZALEZ RWE,1
+B1-07,B1,7,LOPEZ,Hoopers,07 - LOPEZ Hoopers,1
+B1-08,B1,8,DEARDEN,6-7 Elite,08 - DEARDEN 6-7 Elite,1
+B1-09,B1,9,HOPPER,First Place,09 - HOPPER First Place,1
+B2-01,B2,1,PEREZ,Prime Time,01 - PEREZ Prime Time,1
+B2-02,B2,2,CRIPPEN,Mambas,02 - CRIPPEN Mambas,1
+B2-03,B2,3,MCALLASTER,Bucket Squad,03 - MCALLASTER Bucket Squad,1
+B2-04,B2,4,ARCHAMBAULT,Seagulls,04 - ARCHAMBAULT Seagulls,1
+B2-05,B2,5,HOPPER,#1,05 - HOPPER #1,1
+B2-06,B2,6,SHAY,Wolfpack,06 - SHAY Wolfpack,1
+B2-07,B2,7,FERRERIA,Jingle Ballers,07 - FERRERIA Jingle Ballers,1
+B2-08,B2,8,MONROY,Swish Squad,08 - MONROY Swish Squad,1
+B2-09,B2,9,KLAM,Overtime Elite,09 - KLAM Overtime Elite,1
+B2-10,B2,10,QUINTANAR,Space Jam,10 - QUINTANAR Space Jam,1
+B2-11,B2,11,ROBERTSON,Altitude,11 - ROBERTSON Altitude,1
+B3-01,B3,1,DAVIS,Supersonics,01 - DAVIS Supersonics,1
+B3-02,B3,2,OHARA,Bananas,02 - OHARA Bananas,1
+B3-03,B3,3,DEPAK,Destroyers,03 - DEPAK Destroyers,1
+B3-04,B3,4,BUCCOLA,Hornets,04 - BUCCOLA Hornets,1
+B3-05,B3,5,ALONZO,Lakers,05 - ALONZO Lakers,1
+B3-06,B3,6,LOPEZ,Panthers,06 - LOPEZ Panthers,1
+B3-07,B3,7,EWALD,6-7er's,07 - EWALD 6-7er's,1
+B3-08,B3,8,SHAY,Wolfpack,08 - SHAY Wolfpack,1
+G1-01,G1,1,WHITE,Lady Panthers,01 - WHITE Lady Panthers,1
+G1-02,G1,2,BABAIAN,Black Mambas,02 - BABAIAN Black Mambas,1
+G1-03,G1,3,RAGANO,Sparks,03 - RAGANO Sparks,1
+G1-04,G1,4,HARRISON,Valkyries,04 - HARRISON Valkyries,1
+G2-01,G2,1,BAWEK,Storm,01 - BAWEK Storm,1
+G2-02,G2,2,CLARK,Dunkin Donuts,02 - CLARK Dunkin Donuts,1
+G2-03,G2,3,HAWKINS,Puma Pack,03 - HAWKINS Puma Pack,1
+G2-04,G2,4,MERRY,Fuchsia Fire,04 - MERRY Fuchsia Fire,1
+G2-05,G2,5,VILLAVICENCIO,Domin8,05 - VILLAVICENCIO Domin8,1

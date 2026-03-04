@@ -1,0 +1,2 @@
+rule_id,rule_name,league_code,league_scope,team_id,team_name,coach_name,request_type,applies_to,specific_dates,weekdays,time_rule,time_value,priority,status,summary,created_at
+1,Rule 2,B3,B3,B3-02,02 - OHARA Bananas,OHARA,Coach Request,All games,,,No games before time,10:45,High,Active,02 - OHARA Bananas / OHARA (B3) | All games | No games before time: 10:45,2026-02-28T22:48:36

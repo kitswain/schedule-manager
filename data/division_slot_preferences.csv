@@ -1,0 +1,8 @@
+division_code,venue_id,day_of_week,start_time,preference_level,notes
+G1,CHS-BIG,Sun,10:45,preferred,Typical G1 slot.
+G1,CHS-BIG,Sun,11:45,preferred,Typical G1 slot.
+G2,CHS-SMALL,Sun,14:15,preferred,Typical G2 slot.
+G2,CHS-SMALL,Sun,15:15,preferred,Typical G2 slot.
+G2,CHS-SMALL,Sun,16:30,preferred,Typical G2 slot.
+B2,ERJH,Sun,08:30,avoid,Usually not used.
+B2,ERJH,Sun,16:30,avoid,Usually not used.

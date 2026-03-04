@@ -1,0 +1,12 @@
+rule_key,enabled,severity,description
+required_field,1,error,Required schedule columns must be populated.
+invalid_matchup,1,error,Home and away team cannot be the same.
+unknown_team,1,error,Team IDs must exist in teams data.
+cross_division_match,1,error,Home and away teams must belong to same division.
+division_mismatch,1,warning,division_code should match selected teams.
+slot_not_in_availability,1,warning,Scheduled slot should exist in enabled game dates and venue slots.
+slot_collision,1,error,Only one game per venue/date/time.
+team_overlap,1,error,A team cannot play two games at same date/time.
+coach_overlap,1,error,A coach cannot have overlapping games.
+non_primary_venue,1,warning,Warn when division is off its primary venue.
+avoid_slot_used,1,warning,Warn when division uses an avoid-marked slot.

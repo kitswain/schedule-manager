@@ -1,0 +1,6 @@
+division_code,venue_id,preference_rank,is_primary,notes
+B1,CHS-BIG,1,1,Primary venue.
+G1,CHS-BIG,1,1,Primary venue.
+B3,CHS-SMALL,1,1,Primary venue.
+G2,CHS-SMALL,1,1,Primary venue.
+B2,ERJH,1,1,Primary venue.

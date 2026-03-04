@@ -1,0 +1,6 @@
+division_code,division_name,gender,min_grade,max_grade,grade_band_label,sort_order,is_active
+G2,Girls 3rd-5th,Girls,3,5,"3rd, 4th, 5th",1,1
+G1,Girls 6th-8th,Girls,6,8,"6th, 7th, 8th",2,1
+B3,Boys 3rd-4th,Boys,3,4,"3rd & 4th",3,1
+B2,Boys 5th-6th,Boys,5,6,"5th & 6th",4,1
+B1,Boys 7th-8th,Boys,7,8,"7th & 8th",5,1
