@@ -133,6 +133,20 @@ def load_csv(name: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def apply_tooltip_position_css() -> None:
+    # Keep native Streamlit help tooltip behavior, but bias placement to the right of the icon.
+    st.markdown(
+        """
+        <style>
+        div[role="tooltip"][data-popper-placement] {
+            transform: translateX(14px) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def ensure_program_models(divisions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     if PROGRAMS_FILE.exists():
         programs = pd.read_csv(PROGRAMS_FILE)
@@ -1347,7 +1361,16 @@ def division_grid_to_games(grid: pd.DataFrame, division_code: str, team_lookup: 
 
 def build_schedule_volume_options(team_count: int, weekends: int, slots_per_week: int) -> pd.DataFrame:
     if team_count <= 0 or weekends <= 0 or slots_per_week <= 0:
-        return pd.DataFrame(columns=["option", "total_games", "games_per_week", "team_game_distribution", "notes"])
+        return pd.DataFrame(
+            columns=[
+                "option",
+                "max_games_per_team_per_week",
+                "total_games",
+                "games_per_week",
+                "team_game_distribution",
+                "weekly_pattern",
+            ]
+        )
 
     def dist_text(total_games: int) -> str:
         appearances = 2 * total_games
@@ -1359,18 +1382,19 @@ def build_schedule_volume_options(team_count: int, weekends: int, slots_per_week
 
     options = []
     for max_games_per_team_week, label in [
-        (1, "One game per team per weekend"),
-        (2, "Allow up to two games per team per weekend"),
+        (1, "Fewer games per team with a bye each week"),
+        (2, "More games per team with a double-header each week"),
     ]:
         games_per_week = min(slots_per_week, (team_count * max_games_per_team_week) // 2)
         total_games = games_per_week * weekends
         options.append(
             {
                 "option": label,
+                "max_games_per_team_per_week": max_games_per_team_week,
                 "total_games": total_games,
                 "games_per_week": games_per_week,
                 "team_game_distribution": dist_text(total_games),
-                "notes": "Supported by current generator",
+                "weekly_pattern": "One team with a bye" if max_games_per_team_week == 1 else "One team with a double-header",
             }
         )
 
@@ -1386,7 +1410,8 @@ def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_
     st.markdown(
         "1. Select a division and number of weekends.\n"
         "2. Generate random matchups or fill cells manually using `Home vs Away` team numbers (example: `3 vs 4`).\n"
-        "3. Review conflict checks and home/away balance, then download CSV."
+        "3. Review validations to ensure schedule balance.\n"
+        "4. Save your Schedule."
     )
 
     division_options = sorted(divisions["division_code"].tolist()) if not divisions.empty else []
@@ -1401,18 +1426,16 @@ def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_
     division_team_df = get_division_teams(teams, selected_division) if selected_division else pd.DataFrame()
     team_count = int(len(division_team_df))
     with tcol:
-        st.text_input("Number of teams", value=str(team_count), disabled=True)
+        st.text_input(
+            "Number of teams",
+            value=str(team_count),
+            disabled=True,
+            help="This value is based on the Division configuration.",
+        )
 
     wcol, _ = st.columns([1, 4])
     with wcol:
         weekends = st.number_input("Number of weekends", min_value=1, max_value=30, value=10, step=1, key="division_builder_weekends")
-    mwcol, _ = st.columns([1, 4])
-    with mwcol:
-        max_games_per_team_per_week = st.selectbox(
-            "Max games per team per weekend",
-            options=[1, 2],
-            index=0,
-        )
 
     parsed_slots: list[str] = []
     if (
@@ -1443,15 +1466,36 @@ def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_
     inherited_col_ratio = 1 if len(inherited_display) <= 48 else 2
     icl, _ = st.columns([inherited_col_ratio, 5 - inherited_col_ratio])
     with icl:
-        st.text_input("Inherited time slots", value=inherited_display, disabled=True)
+        st.text_input(
+            "Time Slots",
+            value=inherited_display,
+            disabled=True,
+            help="This value is based on the Venue configuration.",
+        )
 
-    st.write("Schedule Volume Options")
+    st.write("Select Scheduling Options")
     options_df = build_schedule_volume_options(
         team_count=team_count,
         weekends=int(weekends),
         slots_per_week=len(parsed_slots),
     )
-    st.dataframe(options_df, use_container_width=True, hide_index=True, height=130)
+    if not options_df.empty:
+        options_view = options_df[["option", "total_games", "games_per_week", "team_game_distribution", "weekly_pattern"]].copy()
+        event = st.dataframe(
+            options_view,
+            use_container_width=True,
+            hide_index=True,
+            height=130,
+            selection_mode="single-row",
+            on_select="rerun",
+            key=f"scheduling_options_table_{selected_division}",
+        )
+        selected_rows = event.selection.rows if event and event.selection else []
+        selected_option_idx = selected_rows[0] if selected_rows else 0
+        max_games_per_team_per_week = int(options_df.iloc[selected_option_idx]["max_games_per_team_per_week"])
+    else:
+        st.warning("No valid scheduling options available for current settings.")
+        max_games_per_team_per_week = 1
 
     grid_state_key = f"division_grid_{selected_division}"
     signature = (selected_division, int(weekends), tuple(parsed_slots))
@@ -2202,6 +2246,7 @@ def render_saved_schedules_tab(divisions: pd.DataFrame) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="League Scheduler Workbench", layout="wide")
+    apply_tooltip_position_css()
     st.title("Schedule Manager")
     st.caption("Add all your league data and auto-generate this season's schedule")
     init_db()
@@ -2235,7 +2280,7 @@ def main() -> None:
         else {"CYB-2025-26": "2025-26 CYB Season"}
     )
     selected_program_id = st.selectbox(
-        "Program",
+        "Season",
         options=program_options,
         index=0,
         format_func=lambda x: program_name_map.get(str(x), str(x)),
