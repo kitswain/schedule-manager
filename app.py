@@ -51,6 +51,45 @@ def init_db() -> None:
             )
             """
         )
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(saved_schedules)").fetchall()}
+        if "is_active" not in cols:
+            conn.execute("ALTER TABLE saved_schedules ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0")
+        if "archived_on" not in cols:
+            conn.execute("ALTER TABLE saved_schedules ADD COLUMN archived_on TEXT")
+        if "archived_reason" not in cols:
+            conn.execute("ALTER TABLE saved_schedules ADD COLUMN archived_reason TEXT")
+
+        divisions = [str(r[0]) for r in conn.execute("SELECT DISTINCT division FROM saved_schedules").fetchall()]
+        for div in divisions:
+            rows = conn.execute(
+                """
+                SELECT schedule_id, is_active
+                FROM saved_schedules
+                WHERE division = ?
+                ORDER BY is_active DESC, schedule_id DESC
+                """,
+                [div],
+            ).fetchall()
+            if not rows:
+                continue
+            selected_id = int(rows[0][0])
+            conn.execute("UPDATE saved_schedules SET is_active = 0 WHERE division = ?", [div])
+            conn.execute(
+                """
+                UPDATE saved_schedules
+                SET is_active = 1, archived_on = NULL, archived_reason = NULL
+                WHERE schedule_id = ?
+                """,
+                [selected_id],
+            )
+
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_schedules_one_active_per_division
+            ON saved_schedules(division)
+            WHERE is_active = 1
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -62,10 +101,36 @@ def save_schedule_to_db(division: str, weekends: int, games_df: pd.DataFrame) ->
         created_on = pd.Timestamp.now().isoformat(timespec="seconds")
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO saved_schedules (division, weekends, created_on) VALUES (?, ?, ?)",
+            """
+            INSERT INTO saved_schedules
+            (division, weekends, created_on, is_active, archived_on, archived_reason)
+            VALUES (?, ?, ?, 0, NULL, NULL)
+            """,
             (division, int(weekends), created_on),
         )
         schedule_id = int(cur.lastrowid)
+        cur.execute(
+            """
+            UPDATE saved_schedules
+            SET is_active = 0,
+                archived_on = COALESCE(archived_on, ?),
+                archived_reason = CASE
+                    WHEN archived_reason IS NULL OR archived_reason = ''
+                    THEN ?
+                    ELSE archived_reason
+                END
+            WHERE division = ? AND schedule_id <> ? AND is_active = 1
+            """,
+            (created_on, f"Superseded by schedule {schedule_id}", str(division), int(schedule_id)),
+        )
+        cur.execute(
+            """
+            UPDATE saved_schedules
+            SET is_active = 1, archived_on = NULL, archived_reason = NULL
+            WHERE schedule_id = ?
+            """,
+            (int(schedule_id),),
+        )
 
         if not games_df.empty:
             rows = []
@@ -98,11 +163,104 @@ def load_saved_schedules_from_db() -> pd.DataFrame:
     conn = get_db_connection()
     try:
         q = """
-            SELECT schedule_id, division, weekends, created_on
+            SELECT
+                schedule_id,
+                division,
+                weekends,
+                created_on,
+                COALESCE(is_active, 0) AS is_active,
+                archived_on,
+                COALESCE(archived_reason, '') AS archived_reason
             FROM saved_schedules
             ORDER BY schedule_id DESC
         """
         return pd.read_sql_query(q, conn)
+    finally:
+        conn.close()
+
+
+def set_active_schedule(schedule_id: int) -> bool:
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT division FROM saved_schedules WHERE schedule_id = ?", [int(schedule_id)]).fetchone()
+        if not row:
+            return False
+        division = str(row[0])
+        conn.execute("UPDATE saved_schedules SET is_active = 0 WHERE division = ?", [division])
+        conn.execute(
+            """
+            UPDATE saved_schedules
+            SET is_active = 1, archived_on = NULL, archived_reason = NULL
+            WHERE schedule_id = ?
+            """,
+            [int(schedule_id)],
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def archive_schedule(schedule_id: int, reason: str = "Manually archived") -> tuple[bool, str]:
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT division, is_active FROM saved_schedules WHERE schedule_id = ?",
+            [int(schedule_id)],
+        ).fetchone()
+        if not row:
+            return False, "Schedule not found."
+
+        division = str(row[0])
+        now = pd.Timestamp.now().isoformat(timespec="seconds")
+        conn.execute(
+            """
+            UPDATE saved_schedules
+            SET is_active = 0, archived_on = ?, archived_reason = ?
+            WHERE schedule_id = ?
+            """,
+            [now, str(reason), int(schedule_id)],
+        )
+
+        active_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM saved_schedules WHERE division = ? AND is_active = 1",
+                [division],
+            ).fetchone()[0]
+        )
+        if active_count == 0:
+            fallback = conn.execute(
+                """
+                SELECT schedule_id
+                FROM saved_schedules
+                WHERE division = ? AND schedule_id <> ?
+                ORDER BY schedule_id DESC
+                LIMIT 1
+                """,
+                [division, int(schedule_id)],
+            ).fetchone()
+            if fallback:
+                conn.execute(
+                    """
+                    UPDATE saved_schedules
+                    SET is_active = 1, archived_on = NULL, archived_reason = NULL
+                    WHERE schedule_id = ?
+                    """,
+                    [int(fallback[0])],
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE saved_schedules
+                    SET is_active = 1, archived_on = NULL, archived_reason = NULL
+                    WHERE schedule_id = ?
+                    """,
+                    [int(schedule_id)],
+                )
+                conn.commit()
+                return False, "Cannot archive the only schedule in this division."
+        conn.commit()
+        return True, "Schedule archived."
     finally:
         conn.close()
 
@@ -122,6 +280,38 @@ def load_saved_schedule_games_from_db(schedule_id: int) -> pd.DataFrame:
             ORDER BY week_no, time_slot
         """
         return pd.read_sql_query(q, conn, params=[int(schedule_id)])
+    finally:
+        conn.close()
+
+
+def load_latest_saved_schedule_games_by_division(exclude_division: str = "") -> pd.DataFrame:
+    conn = get_db_connection()
+    try:
+        q = """
+            SELECT
+                g.schedule_id,
+                g.division_code,
+                g.week_no,
+                g.time_slot,
+                g.home_team_name,
+                g.away_team_name
+            FROM saved_schedule_games g
+            INNER JOIN saved_schedules s
+                ON s.schedule_id = g.schedule_id
+            INNER JOIN (
+                SELECT
+                    division,
+                    MAX(CASE WHEN COALESCE(is_active, 0) = 1 THEN schedule_id END) AS active_schedule_id,
+                    MAX(schedule_id) AS latest_schedule_id
+                FROM saved_schedules
+                GROUP BY division
+            ) pick
+                ON pick.division = s.division
+               AND s.schedule_id = COALESCE(pick.active_schedule_id, pick.latest_schedule_id)
+            WHERE (? = '' OR g.division_code <> ?)
+            ORDER BY g.division_code, g.week_no, g.time_slot
+        """
+        return pd.read_sql_query(q, conn, params=[str(exclude_division), str(exclude_division)])
     finally:
         conn.close()
 
@@ -806,6 +996,11 @@ def build_team_constraints_for_division(selected_division: str, division_team_df
         for _, r in division_team_df.iterrows()
         if str(r.get("team_id", "")).strip()
     }
+    team_id_to_coach = {
+        str(r["team_id"]): str(r.get("coach_last_name", "")).strip()
+        for _, r in division_team_df.iterrows()
+        if str(r.get("team_id", "")).strip()
+    }
 
     rules = rules_df.copy()
     for col, default in [("status", "Active"), ("league_code", ""), ("league_scope", ""), ("team_id", ""), ("time_rule", ""), ("time_value", "")]:
@@ -837,9 +1032,162 @@ def build_team_constraints_for_division(selected_division: str, division_team_df
             {
                 "time_rule": str(row.get("time_rule", "")).strip(),
                 "time_value": str(row.get("time_value", "")).strip(),
+                "coach_name": team_id_to_coach.get(team_id, ""),
             }
         )
     return constraints
+
+
+def build_coach_links_for_division(
+    selected_division: str,
+    division_team_df: pd.DataFrame,
+    teams: pd.DataFrame,
+    team_coaches: pd.DataFrame,
+) -> tuple[dict[int, set[int]], dict[int, set[str]], set[str]]:
+    if division_team_df.empty or teams.empty or team_coaches.empty:
+        return {}, {}, set()
+
+    num_to_team_id = {
+        int(r["team_number"]): str(r.get("team_id", "")).strip()
+        for _, r in division_team_df.iterrows()
+        if pd.notna(r.get("team_number")) and str(r.get("team_id", "")).strip()
+    }
+    division_team_ids = set(num_to_team_id.values())
+    if not division_team_ids:
+        return {}, {}, set()
+
+    team_to_coach_ids: dict[str, set[str]] = {}
+    if not team_coaches.empty and {"team_id", "coach_id"}.issubset(team_coaches.columns):
+        tmp = team_coaches[["team_id", "coach_id"]].copy()
+        tmp["team_id"] = tmp["team_id"].astype(str).str.strip()
+        tmp["coach_id"] = tmp["coach_id"].astype(str).str.strip()
+        tmp = tmp[(tmp["team_id"] != "") & (tmp["coach_id"] != "")]
+        if not tmp.empty:
+            team_to_coach_ids = tmp.groupby("team_id")["coach_id"].apply(lambda s: set(s.tolist())).to_dict()
+
+    team_num_coach_ids: dict[int, set[str]] = {}
+    for team_num, team_id in num_to_team_id.items():
+        team_num_coach_ids[team_num] = set(team_to_coach_ids.get(team_id, set()))
+
+    tc = team_coaches[["team_id", "coach_id"]].copy()
+    tc["team_id"] = tc["team_id"].astype(str).str.strip()
+    tc["coach_id"] = tc["coach_id"].astype(str).str.strip()
+    tmeta = teams[["team_id", "division_code"]].copy()
+    tmeta["team_id"] = tmeta["team_id"].astype(str).str.strip()
+    tmeta["division_code"] = tmeta["division_code"].astype(str).str.strip()
+    joined = tc.merge(tmeta, on="team_id", how="left").dropna(subset=["division_code"])
+    if joined.empty:
+        return {}, team_num_coach_ids, set()
+
+    coach_div_counts = joined.groupby("coach_id")["division_code"].nunique().to_dict()
+    coaches_in_selected_division = set(
+        joined[joined["division_code"] == str(selected_division)]["coach_id"].astype(str).tolist()
+    )
+    active_coach_ids: set[str] = {
+        c for c in coaches_in_selected_division if int(coach_div_counts.get(c, 0)) > 1
+    }
+    if not active_coach_ids:
+        return {}, team_num_coach_ids, set()
+
+    coach_to_teams: dict[str, set[int]] = {}
+    for team_num, coach_ids in team_num_coach_ids.items():
+        for coach_id in coach_ids:
+            if coach_id in active_coach_ids:
+                coach_to_teams.setdefault(coach_id, set()).add(team_num)
+
+    links: dict[int, set[int]] = {}
+    for team_set in coach_to_teams.values():
+        if len(team_set) < 2:
+            continue
+        for t in team_set:
+            links[t] = set(team_set) - {t}
+
+    return links, team_num_coach_ids, active_coach_ids
+
+
+def build_cross_division_coach_blocks(
+    selected_division: str,
+    teams: pd.DataFrame,
+    team_coaches: pd.DataFrame,
+    division_team_df: pd.DataFrame,
+    team_num_coach_ids: dict[int, set[str]],
+    active_coach_ids: set[str],
+) -> dict[int, dict[str, set[str]]]:
+    if not active_coach_ids or division_team_df.empty:
+        return {}
+
+    saved = load_latest_saved_schedule_games_by_division(exclude_division=selected_division)
+    if saved.empty:
+        return {}
+
+    team_id_by_div_name: dict[tuple[str, str], str] = {}
+    unique_team_id_by_name: dict[str, str] = {}
+    if not teams.empty and {"team_id", "division_code", "team_display_name"}.issubset(teams.columns):
+        tmp = teams[["team_id", "division_code", "team_display_name"]].copy()
+        tmp["team_id"] = tmp["team_id"].astype(str).str.strip()
+        tmp["division_code"] = tmp["division_code"].astype(str).str.strip()
+        tmp["team_display_name"] = tmp["team_display_name"].astype(str).str.strip()
+        tmp = tmp[(tmp["team_id"] != "") & (tmp["team_display_name"] != "")]
+        for _, r in tmp.iterrows():
+            team_id_by_div_name[(str(r["division_code"]), str(r["team_display_name"]))] = str(r["team_id"])
+        name_counts = tmp.groupby("team_display_name")["team_id"].nunique().to_dict()
+        for _, r in tmp.iterrows():
+            name = str(r["team_display_name"])
+            if name_counts.get(name, 0) == 1:
+                unique_team_id_by_name[name] = str(r["team_id"])
+
+    team_to_coach_ids: dict[str, set[str]] = {}
+    if not team_coaches.empty and {"team_id", "coach_id"}.issubset(team_coaches.columns):
+        tc = team_coaches[["team_id", "coach_id"]].copy()
+        tc["team_id"] = tc["team_id"].astype(str).str.strip()
+        tc["coach_id"] = tc["coach_id"].astype(str).str.strip()
+        tc = tc[(tc["team_id"] != "") & (tc["coach_id"] != "")]
+        if not tc.empty:
+            team_to_coach_ids = tc.groupby("team_id")["coach_id"].apply(lambda s: set(s.tolist())).to_dict()
+
+    coach_week_slots: dict[str, dict[str, set[str]]] = {}
+
+    def resolve_team_id(division_code: str, team_display_name: str) -> str:
+        direct = team_id_by_div_name.get((division_code, team_display_name))
+        if direct:
+            return direct
+        return unique_team_id_by_name.get(team_display_name, "")
+
+    for _, r in saved.iterrows():
+        week_no = pd.to_numeric(r.get("week_no"), errors="coerce")
+        if pd.isna(week_no):
+            continue
+        week_col = f"W{int(week_no)}"
+        slot = normalize_time(str(r.get("time_slot", "")))
+        if not slot:
+            continue
+        division_code = str(r.get("division_code", "")).strip()
+        for side in ["home_team_name", "away_team_name"]:
+            team_name = str(r.get(side, "")).strip()
+            if not team_name:
+                continue
+            team_id = resolve_team_id(division_code, team_name)
+            if not team_id:
+                continue
+            coach_ids = team_to_coach_ids.get(team_id, set())
+            for coach_id in coach_ids:
+                if coach_id not in active_coach_ids:
+                    continue
+                coach_week_slots.setdefault(coach_id, {}).setdefault(week_col, set()).add(slot)
+
+    if not coach_week_slots:
+        return {}
+
+    team_blocks: dict[int, dict[str, set[str]]] = {}
+    for team_num, coach_ids in team_num_coach_ids.items():
+        relevant_coaches = [c for c in coach_ids if c in active_coach_ids]
+        if not relevant_coaches:
+            continue
+        for coach_id in relevant_coaches:
+            for week_col, slots in coach_week_slots.get(coach_id, {}).items():
+                team_blocks.setdefault(team_num, {}).setdefault(week_col, set()).update(slots)
+
+    return team_blocks
 
 
 def team_slot_constraint_penalty(
@@ -931,6 +1279,8 @@ def generate_random_division_grid(
     team_count: int,
     seed: int,
     team_constraints: dict[int, list[dict]] | None = None,
+    coach_links: dict[int, set[int]] | None = None,
+    coach_cross_division_blocks: dict[int, dict[str, set[str]]] | None = None,
     max_games_per_team_per_week: int = 1,
 ) -> tuple[pd.DataFrame, str]:
     grid = init_division_grid(week_count, time_slots)
@@ -961,6 +1311,8 @@ def generate_random_division_grid(
     home_counts = {t: 0 for t in range(1, team_count + 1)}
     away_counts = {t: 0 for t in range(1, team_count + 1)}
     team_constraints = team_constraints or {}
+    coach_links = coach_links or {}
+    coach_cross_division_blocks = coach_cross_division_blocks or {}
 
     warning = ""
     pair_counts = {p: 0 for p in all_pairs}
@@ -999,9 +1351,10 @@ def generate_random_division_grid(
                 if week_caps[t] >= max_games_per_team_per_week:
                     continue
                 score = 0.0
-                score += week_caps[t] * 100.0
-                score += week_doubleheader_counts[t] * 40.0
-                score += -remaining_games[t] * 15.0
+                # Priority 1/2: equalize total games and distribute weekly load.
+                score += week_caps[t] * 220.0
+                score += week_doubleheader_counts[t] * 120.0
+                score += -remaining_games[t] * 45.0
                 score += rng.random() * 0.01
                 if score < best_team_score:
                     best_team_score = score
@@ -1026,12 +1379,13 @@ def generate_random_division_grid(
                     continue
 
                 score = 0.0
+                # Priority 2 then 4: weekly balance first, opponent repeat balance next.
+                score += (team_week_games[a] + team_week_games[b]) * 260.0
                 score += pair_counts[pair] * 220.0
                 if pair in last_week_pairs:
-                    score += 220.0
-                score += abs(remaining_games[a] - remaining_games[b]) * 12.0
-                score += -(remaining_games[a] + remaining_games[b]) * 120.0
-                score += (team_week_games[a] + team_week_games[b]) * 90.0
+                    score += 140.0
+                score += abs(remaining_games[a] - remaining_games[b]) * 30.0
+                score += -(remaining_games[a] + remaining_games[b]) * 180.0
                 score += rng.random() * 0.01
 
                 if score < best_score:
@@ -1058,6 +1412,7 @@ def generate_random_division_grid(
 
         matchups = week_pairs[:]
         # Schedule constrained teams first so they don't get stranded with only blocked slots remaining.
+        week_col = f"W{week_ix + 1}"
         matchups.sort(
             key=lambda p: (
                 hard_blocked_slot_count(p[0], time_slots, team_constraints)
@@ -1068,6 +1423,7 @@ def generate_random_division_grid(
         available_slots = time_slots[:]
         rng.shuffle(available_slots)
         scheduled_pairs: list[tuple[int, int]] = []
+        team_week_slot: dict[int, str] = {}
 
         for team_a, team_b in matchups:
             if not available_slots:
@@ -1079,6 +1435,41 @@ def generate_random_division_grid(
                 if violates_hard_time_constraint(team_a, slot, team_constraints):
                     continue
                 if violates_hard_time_constraint(team_b, slot, team_constraints):
+                    continue
+
+                coach_buffer_penalty = 0.0
+                slot_ix = slot_to_index[slot]
+                hard_conflict = False
+                for t in (team_a, team_b):
+                    blocked_slots = coach_cross_division_blocks.get(t, {}).get(week_col, set())
+                    if slot in blocked_slots:
+                        hard_conflict = True
+                        break
+                    for blocked_slot in blocked_slots:
+                        b_ix = slot_to_index.get(blocked_slot)
+                        if b_ix is None:
+                            continue
+                        if abs(slot_ix - b_ix) == 1:
+                            # Prefer one full game-time buffer vs existing saved games in other divisions.
+                            coach_buffer_penalty += 1200.0
+
+                    for other in coach_links.get(t, set()):
+                        other_slot = team_week_slot.get(other)
+                        if not other_slot:
+                            continue
+                        other_ix = slot_to_index.get(other_slot)
+                        if other_ix is None:
+                            continue
+                        gap = abs(slot_ix - other_ix)
+                        if gap == 0:
+                            hard_conflict = True
+                            break
+                        if gap == 1:
+                            # Prefer one full game-time buffer between teams coached by same coach.
+                            coach_buffer_penalty += 1200.0
+                    if hard_conflict:
+                        break
+                if hard_conflict:
                     continue
 
                 slot_balance_score = team_slot_counts[team_a][slot] + team_slot_counts[team_b][slot]
@@ -1098,7 +1489,8 @@ def generate_random_division_grid(
                 orientation_swapped = home_away_score_swapped < home_away_score_forward
                 home_away_score = min(home_away_score_forward, home_away_score_swapped)
 
-                score = (100 * slot_balance_score) + (10 * slot_usage_score) + home_away_score + constraint_score
+                # Priority 5 then 6: slot balance before home/away.
+                score = (40 * slot_balance_score) + (4 * slot_usage_score) + home_away_score + constraint_score + coach_buffer_penalty
                 score += rng.random() * 0.01
 
                 if score < best_score:
@@ -1125,6 +1517,8 @@ def generate_random_division_grid(
             slot_usage[chosen_slot] += 1
             home_counts[home] += 1
             away_counts[away] += 1
+            team_week_slot[team_a] = chosen_slot
+            team_week_slot[team_b] = chosen_slot
             scheduled_pairs.append(tuple(sorted((team_a, team_b))))
 
         last_week_pairs = set(scheduled_pairs)
@@ -1148,15 +1542,21 @@ def parse_matchup_cell(value: str) -> tuple[int, int] | None:
 def analyze_division_grid(
     grid: pd.DataFrame,
     valid_team_numbers: set[int],
+    coach_links: dict[int, set[int]] | None = None,
+    coach_cross_division_blocks: dict[int, dict[str, set[str]]] | None = None,
     max_games_per_team_per_week: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     findings = []
     game_counts: dict[int, dict[str, int]] = {n: {"home": 0, "away": 0, "total": 0} for n in valid_team_numbers}
+    coach_links = coach_links or {}
+    coach_cross_division_blocks = coach_cross_division_blocks or {}
     max_games_per_team_per_week = max(1, int(max_games_per_team_per_week))
 
     week_cols = [c for c in grid.columns if c.startswith("W")]
+    slot_order = {str(row.get("time_slot", "")).strip(): ix for ix, (_, row) in enumerate(grid.iterrows())}
     for week_col in week_cols:
         teams_seen_count: dict[int, int] = {}
+        team_week_slot: dict[int, str] = {}
         for _, row in grid.iterrows():
             slot = str(row.get("time_slot", ""))
             val = str(row.get(week_col, "")).strip()
@@ -1218,6 +1618,84 @@ def analyze_division_grid(
             game_counts[home]["total"] += 1
             game_counts[away]["away"] += 1
             game_counts[away]["total"] += 1
+            team_week_slot[home] = slot
+            team_week_slot[away] = slot
+
+        if team_week_slot and coach_links:
+            checked: set[tuple[int, int]] = set()
+            for team_num, slot in team_week_slot.items():
+                for other in coach_links.get(team_num, set()):
+                    if other not in team_week_slot:
+                        continue
+                    pair = tuple(sorted((team_num, other)))
+                    if pair in checked:
+                        continue
+                    checked.add(pair)
+                    other_slot = team_week_slot[other]
+                    i1 = slot_order.get(slot)
+                    i2 = slot_order.get(other_slot)
+                    if i1 is None or i2 is None:
+                        continue
+                    gap = abs(i1 - i2)
+                    if gap == 0:
+                        findings.append(
+                            {
+                                "severity": "error",
+                                "week": week_col,
+                                "time_slot": slot,
+                                "message": f"Coach-linked teams {team_num} and {other} overlap at {slot}.",
+                            }
+                        )
+                    elif gap == 1:
+                        findings.append(
+                            {
+                                "severity": "warning",
+                                "week": week_col,
+                                "time_slot": slot,
+                                "message": (
+                                    f"Coach-linked teams {team_num} and {other} are back-to-back "
+                                    f"({slot} and {other_slot}); one-slot buffer preferred."
+                                ),
+                            }
+                        )
+
+        if team_week_slot and coach_cross_division_blocks:
+            for team_num, slot in team_week_slot.items():
+                blocked_slots = coach_cross_division_blocks.get(team_num, {}).get(week_col, set())
+                if not blocked_slots:
+                    continue
+                i1 = slot_order.get(slot)
+                if i1 is None:
+                    continue
+                if slot in blocked_slots:
+                    findings.append(
+                        {
+                            "severity": "error",
+                            "week": week_col,
+                            "time_slot": slot,
+                            "message": f"Team {team_num} overlaps with this coach's saved game in another division.",
+                        }
+                    )
+                    continue
+                adjacent = []
+                for b in blocked_slots:
+                    i2 = slot_order.get(b)
+                    if i2 is None:
+                        continue
+                    if abs(i1 - i2) == 1:
+                        adjacent.append(b)
+                if adjacent:
+                    findings.append(
+                        {
+                            "severity": "warning",
+                            "week": week_col,
+                            "time_slot": slot,
+                            "message": (
+                                f"Team {team_num} is back-to-back with this coach's saved game "
+                                f"in another division ({', '.join(sorted(adjacent))}); one-slot buffer preferred."
+                            ),
+                        }
+                    )
 
     findings_df = pd.DataFrame(findings) if findings else pd.DataFrame(columns=["severity", "week", "time_slot", "message"])
     balance_rows = [
@@ -1257,6 +1735,166 @@ def build_time_slot_team_counts(grid: pd.DataFrame, valid_team_numbers: set[int]
         return pd.DataFrame(columns=cols)
 
     out = pd.DataFrame(rows)
+    return out
+
+
+def build_multi_division_coach_schedule_grids(
+    grid: pd.DataFrame,
+    selected_division: str,
+    division_team_df: pd.DataFrame,
+    teams: pd.DataFrame,
+    team_coaches: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    if grid.empty or division_team_df.empty or teams.empty or team_coaches.empty:
+        return {}
+
+    required_team_cols = {"team_id", "division_code"}
+    required_coach_cols = {"team_id", "coach_id"}
+    if not required_team_cols.issubset(teams.columns) or not required_coach_cols.issubset(team_coaches.columns):
+        return {}
+
+    teams_ref = teams[["team_id", "division_code"]].copy()
+    teams_ref["team_id"] = teams_ref["team_id"].astype(str).str.strip()
+    teams_ref["division_code"] = teams_ref["division_code"].astype(str).str.strip()
+
+    coach_ref = team_coaches[["team_id", "coach_id"]].copy()
+    coach_ref["team_id"] = coach_ref["team_id"].astype(str).str.strip()
+    coach_ref["coach_id"] = coach_ref["coach_id"].astype(str).str.strip()
+    coach_ref = coach_ref[(coach_ref["team_id"] != "") & (coach_ref["coach_id"] != "")]
+    if coach_ref.empty:
+        return {}
+
+    coach_divs = coach_ref.merge(teams_ref, on="team_id", how="left")
+    coach_divs = coach_divs.dropna(subset=["division_code"])
+    multi_division_coaches = {
+        str(r["coach_id"])
+        for _, r in coach_divs.groupby("coach_id")["division_code"].nunique().reset_index(name="div_count").iterrows()
+        if int(r["div_count"]) > 1
+    }
+    if not multi_division_coaches:
+        return {}
+
+    team_num_to_id = {
+        int(r["team_number"]): str(r["team_id"]).strip()
+        for _, r in division_team_df.iterrows()
+        if pd.notna(r.get("team_number")) and str(r.get("team_id", "")).strip()
+    }
+    division_team_ids = set(team_num_to_id.values())
+
+    team_id_to_coaches = coach_ref.groupby("team_id")["coach_id"].apply(lambda s: set(s.tolist())).to_dict()
+    coaches_in_division = set()
+    for team_id in division_team_ids:
+        coaches_in_division.update(team_id_to_coaches.get(team_id, set()))
+    tracked_coaches = sorted([c for c in coaches_in_division if c in multi_division_coaches])
+    if not tracked_coaches:
+        return {}
+
+    coach_label_by_id: dict[str, str] = {}
+    raw_labels_by_id: dict[str, str] = {c: c for c in tracked_coaches}
+    for _, r in division_team_df.iterrows():
+        team_id = str(r.get("team_id", "")).strip()
+        coach_last = str(r.get("coach_last_name", "")).strip()
+        for coach_id in team_id_to_coaches.get(team_id, set()):
+            if coach_id not in tracked_coaches:
+                continue
+            raw_labels_by_id[coach_id] = coach_last if coach_last else coach_id
+
+    label_counts: dict[str, int] = {}
+    for raw in raw_labels_by_id.values():
+        label_counts[raw] = label_counts.get(raw, 0) + 1
+    for coach_id, raw in raw_labels_by_id.items():
+        coach_label_by_id[coach_id] = raw if label_counts.get(raw, 0) == 1 else f"{raw} ({coach_id})"
+
+    tracked_coaches = sorted(tracked_coaches, key=lambda c: coach_label_by_id[c])
+    week_cols = [c for c in grid.columns if c.startswith("W")]
+    time_slots = [str(r.get("time_slot", "")).strip() for _, r in grid.iterrows()]
+    slot_set = {s for s in time_slots if s}
+    time_slots = [s for s in time_slots if s]
+    if not week_cols or not time_slots:
+        return {}
+
+    coach_week_slot_divs: dict[str, dict[str, dict[str, set[str]]]] = {
+        c: {w: {s: set() for s in time_slots} for w in week_cols} for c in tracked_coaches
+    }
+
+    # Current division schedule (editable grid)
+    for week_col in week_cols:
+        for _, row in grid.iterrows():
+            slot = str(row.get("time_slot", "")).strip()
+            if slot not in slot_set:
+                continue
+            val = str(row.get(week_col, "")).strip()
+            parsed = parse_matchup_cell(val)
+            if not parsed:
+                continue
+            home, away = parsed
+            for team_num in [home, away]:
+                team_id = team_num_to_id.get(int(team_num))
+                if not team_id:
+                    continue
+                for coach_id in team_id_to_coaches.get(team_id, set()):
+                    if coach_id in coach_week_slot_divs:
+                        coach_week_slot_divs[coach_id][week_col][slot].add(str(selected_division))
+
+    # Active schedule games from other divisions
+    saved = load_latest_saved_schedule_games_by_division(exclude_division=selected_division)
+    if not saved.empty:
+        teams_ref2 = teams[["team_id", "division_code", "team_display_name"]].copy()
+        teams_ref2["team_id"] = teams_ref2["team_id"].astype(str).str.strip()
+        teams_ref2["division_code"] = teams_ref2["division_code"].astype(str).str.strip()
+        teams_ref2["team_display_name"] = teams_ref2["team_display_name"].astype(str).str.strip()
+        teams_ref2 = teams_ref2[(teams_ref2["team_id"] != "") & (teams_ref2["team_display_name"] != "")]
+
+        team_id_by_div_name: dict[tuple[str, str], str] = {}
+        unique_team_id_by_name: dict[str, str] = {}
+        for _, r in teams_ref2.iterrows():
+            team_id_by_div_name[(str(r["division_code"]), str(r["team_display_name"]))] = str(r["team_id"])
+        name_counts = teams_ref2.groupby("team_display_name")["team_id"].nunique().to_dict()
+        for _, r in teams_ref2.iterrows():
+            nm = str(r["team_display_name"])
+            if name_counts.get(nm, 0) == 1:
+                unique_team_id_by_name[nm] = str(r["team_id"])
+
+        def resolve_team_id(division_code: str, team_display_name: str) -> str:
+            direct = team_id_by_div_name.get((division_code, team_display_name))
+            if direct:
+                return direct
+            return unique_team_id_by_name.get(team_display_name, "")
+
+        for _, r in saved.iterrows():
+            week_no = pd.to_numeric(r.get("week_no"), errors="coerce")
+            if pd.isna(week_no):
+                continue
+            week_col = f"W{int(week_no)}"
+            if week_col not in week_cols:
+                continue
+            slot = normalize_time(str(r.get("time_slot", "")))
+            if slot not in slot_set:
+                continue
+            division_code = str(r.get("division_code", "")).strip()
+            if not division_code:
+                continue
+            for side in ["home_team_name", "away_team_name"]:
+                team_name = str(r.get(side, "")).strip()
+                if not team_name:
+                    continue
+                team_id = resolve_team_id(division_code, team_name)
+                if not team_id:
+                    continue
+                for coach_id in team_id_to_coaches.get(team_id, set()):
+                    if coach_id in coach_week_slot_divs:
+                        coach_week_slot_divs[coach_id][week_col][slot].add(division_code)
+
+    out: dict[str, pd.DataFrame] = {}
+    for coach_id in tracked_coaches:
+        rows: list[dict[str, object]] = []
+        for slot in time_slots:
+            row = {"Time": slot}
+            for week_col in week_cols:
+                vals = sorted(coach_week_slot_divs[coach_id][week_col][slot])
+                row[week_col] = ", ".join(vals)
+            rows.append(row)
+        out[coach_label_by_id[coach_id]] = pd.DataFrame(rows)
     return out
 
 
@@ -1381,20 +2019,32 @@ def build_schedule_volume_options(team_count: int, weekends: int, slots_per_week
         return f"{team_count - extra} teams with {base} games; {extra} teams with {base + 1} games"
 
     options = []
-    for max_games_per_team_week, label in [
-        (1, "Fewer games per team with a bye each week"),
-        (2, "More games per team with a double-header each week"),
-    ]:
+    for max_games_per_team_week in [1, 2]:
         games_per_week = min(slots_per_week, (team_count * max_games_per_team_week) // 2)
         total_games = games_per_week * weekends
+        appearances = 2 * games_per_week
+        weekly_base = appearances // team_count
+        weekly_extra = appearances % team_count
+
+        if max_games_per_team_week == 1:
+            if weekly_base == 1 and weekly_extra == 0:
+                option_label = "Standard schedule with one game per team each week"
+                weekly_pattern = "All teams play one game each week"
+            else:
+                option_label = "Fewer games per team with a bye each week"
+                weekly_pattern = "One team with a bye"
+        else:
+            option_label = "More games per team with a double-header each week"
+            weekly_pattern = "One team with a double-header"
+
         options.append(
             {
-                "option": label,
+                "option": option_label,
                 "max_games_per_team_per_week": max_games_per_team_week,
                 "total_games": total_games,
                 "games_per_week": games_per_week,
                 "team_game_distribution": dist_text(total_games),
-                "weekly_pattern": "One team with a bye" if max_games_per_team_week == 1 else "One team with a double-header",
+                "weekly_pattern": weekly_pattern,
             }
         )
 
@@ -1403,7 +2053,12 @@ def build_schedule_volume_options(team_count: int, weekends: int, slots_per_week
     return out
 
 
-def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_slots: pd.DataFrame) -> None:
+def render_division_builder(
+    divisions: pd.DataFrame,
+    teams: pd.DataFrame,
+    venue_slots: pd.DataFrame,
+    team_coaches: pd.DataFrame,
+) -> None:
     st.subheader("Schedule Builder")
     st.caption("Follow these simple steps to create your schedule in a matter of minutes!")
 
@@ -1502,6 +2157,17 @@ def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_
     sig_key = f"{grid_state_key}_sig"
     generated_key = f"{grid_state_key}_generated"
     team_constraints = build_team_constraints_for_division(selected_division, division_team_df)
+    coach_links, team_num_coach_ids, active_coach_ids = build_coach_links_for_division(
+        selected_division, division_team_df, teams, team_coaches
+    )
+    coach_cross_division_blocks = build_cross_division_coach_blocks(
+        selected_division=selected_division,
+        teams=teams,
+        team_coaches=team_coaches,
+        division_team_df=division_team_df,
+        team_num_coach_ids=team_num_coach_ids,
+        active_coach_ids=active_coach_ids,
+    )
 
     if sig_key not in st.session_state or st.session_state[sig_key] != signature:
         st.session_state[grid_state_key] = init_division_grid(int(weekends), parsed_slots)
@@ -1515,6 +2181,8 @@ def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_
             team_count=int(team_count),
             seed=seed_value,
             team_constraints=team_constraints,
+            coach_links=coach_links,
+            coach_cross_division_blocks=coach_cross_division_blocks,
             max_games_per_team_per_week=int(max_games_per_team_per_week),
         )
         st.session_state[grid_state_key] = generated_grid
@@ -1539,8 +2207,16 @@ def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_
         constraints_df = pd.DataFrame(rows)
         st.info("Constraints in effect for this division:")
         st.dataframe(constraints_df, use_container_width=True, hide_index=True, height=140)
+        if coach_cross_division_blocks:
+            block_count = sum(len(slots) for week_map in coach_cross_division_blocks.values() for slots in week_map.values())
+            st.caption(f"Cross-division coach constraints active from saved schedules ({block_count} blocked week/slot combinations).")
+        elif active_coach_ids:
+            st.caption(f"Coach conflict protection active for {len(active_coach_ids)} multi-division coach(es).")
     else:
-        st.caption("No active team constraints found for this division.")
+        if active_coach_ids:
+            st.caption(f"Coach conflict protection active for {len(active_coach_ids)} multi-division coach(es).")
+        else:
+            st.caption("No active team constraints found for this division.")
 
     g1, gap, g2, _ = st.columns([1.8, 0.08, 1.0, 5.0])
     with g1:
@@ -1560,6 +2236,8 @@ def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_
     findings, balance = analyze_division_grid(
         grid_df,
         valid_team_numbers,
+        coach_links=coach_links,
+        coach_cross_division_blocks=coach_cross_division_blocks,
         max_games_per_team_per_week=int(max_games_per_team_per_week),
     )
     total_games = int((grid_df[[c for c in grid_df.columns if c.startswith("W")]] != "").sum().sum())
@@ -1581,6 +2259,13 @@ def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_
         st.dataframe(findings, use_container_width=True, height=200)
 
     time_slot_counts = build_time_slot_team_counts(grid_df, valid_team_numbers)
+    coach_schedule_grids = build_multi_division_coach_schedule_grids(
+        grid=grid_df,
+        selected_division=selected_division,
+        division_team_df=division_team_df,
+        teams=teams,
+        team_coaches=team_coaches,
+    )
     left, right = st.columns(2)
     with left:
         st.write("Games By Time Slot")
@@ -1591,6 +2276,20 @@ def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_
     with right:
         st.write("Home/Away Balance")
         st.dataframe(balance, use_container_width=True, height=220, hide_index=True)
+
+    st.write("Multi-Division Coach Schedule")
+    if not coach_schedule_grids:
+        st.caption("No multi-division coaches found for this division.")
+    else:
+        coach_options = sorted(coach_schedule_grids.keys())
+        selected_coach = st.radio(
+            "Coach",
+            options=coach_options,
+            horizontal=True,
+            key=f"multi_division_coach_selector_{selected_division}",
+            label_visibility="collapsed",
+        )
+        st.dataframe(coach_schedule_grids[selected_coach], use_container_width=True, height=260, hide_index=True)
 
     valid_games = extract_valid_games(grid_df, valid_team_numbers)
     week_cols = [c for c in grid_df.columns if c.startswith("W")]
@@ -1621,7 +2320,10 @@ def render_division_builder(divisions: pd.DataFrame, teams: pd.DataFrame, venue_
         grid_df.to_csv(grid_path, index=False)
         division_games.to_csv(games_path, index=False)
         schedule_id = save_schedule_to_db(selected_division, int(weekends), division_games)
-        st.success(f"Saved {grid_path.name} and {games_path.name}. Schedule ID: {schedule_id}")
+        st.success(
+            f"Saved {grid_path.name} and {games_path.name}. "
+            f"Schedule ID: {schedule_id} is now the active {selected_division} schedule."
+        )
 
 
 def render_workbench(
@@ -1980,13 +2682,53 @@ def render_teams_tab(
     divisions: pd.DataFrame,
 ) -> None:
     st.subheader("Divisions")
-    st.caption("Manage division team mappings and team records used by the scheduler.")
-    st.write("Division Team Mapping")
+    st.caption("Manage coaches and teams within a division.")
 
     division_options = sorted(divisions["division_code"].tolist()) if not divisions.empty else []
-    if division_options:
-        mapping_division = st.selectbox("Team Number Mapping Division", options=division_options, index=0, key="teams_mapping_division")
-        mapping_df = get_division_teams(teams, mapping_division)
+    if not division_options:
+        st.info("No divisions found.")
+        return
+
+    selected_division = st.selectbox(
+        "Division",
+        options=division_options,
+        index=0,
+        key="teams_mapping_division",
+    )
+    mapping_df = get_division_teams(teams, selected_division)
+
+    coaches_tab, teams_tab = st.tabs(["Coaches", "Teams"])
+
+    with coaches_tab:
+        st.write("Coaches")
+        if mapping_df.empty:
+            st.info("No teams found for this division.")
+        else:
+            coaches_df = mapping_df.copy()
+            coaches_df["coach_last_name"] = coaches_df["coach_last_name"].fillna("").astype(str).str.strip()
+            coaches_df["coach_last_name"] = coaches_df["coach_last_name"].replace("", "Unknown")
+            coach_summary = (
+                coaches_df.groupby("coach_last_name", as_index=False)
+                .agg(
+                    team_count=("team_id", "count"),
+                    teams=("team_display_name", lambda s: " | ".join(sorted(s.astype(str).tolist()))),
+                )
+                .sort_values(["coach_last_name"])
+                .reset_index(drop=True)
+            )
+            st.dataframe(
+                coach_summary,
+                use_container_width=True,
+                hide_index=True,
+                height=420,
+                column_config={
+                    "coach_last_name": st.column_config.TextColumn("coach_last_name", width="medium"),
+                    "team_count": st.column_config.NumberColumn("team_count", width="small"),
+                    "teams": st.column_config.TextColumn("teams", width="large"),
+                },
+            )
+
+    with teams_tab:
         st.write("Team Number Mapping")
         st.dataframe(
             mapping_df,
@@ -2102,6 +2844,7 @@ def render_schedule_considerations_tab(divisions: pd.DataFrame, teams: pd.DataFr
             "Prefer earlier games",
             "No games before time",
             "No games after time",
+            "No coach overlap (1-slot buffer preferred)",
             "Prefer specific slot(s)",
             "Avoid specific slot(s)",
             "Between time window",
@@ -2162,35 +2905,71 @@ def render_schedule_considerations_tab(divisions: pd.DataFrame, teams: pd.DataFr
         }
         updated = pd.concat([current, pd.DataFrame([row])], ignore_index=True)
         updated.to_csv(CONSIDERATIONS_FILE, index=False)
+        st.session_state["considerations_table_sig"] = str(
+            pd.util.hash_pandas_object(updated.fillna("").astype(str), index=True).sum()
+        )
         st.success("Saved constraint to data/schedule_considerations.csv")
 
     st.divider()
     st.write("Saved Rules")
     rules_df = load_or_default_considerations()
     edited_rules = st.data_editor(rules_df, num_rows="dynamic", use_container_width=True, key="considerations_table_editor")
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Save Rules Table"):
-            edited_rules.to_csv(CONSIDERATIONS_FILE, index=False)
-            st.success("Saved data/schedule_considerations.csv")
-    with c2:
-        st.download_button(
-            "Download Rules CSV",
-            data=edited_rules.to_csv(index=False),
-            file_name="schedule_considerations.csv",
-            mime="text/csv",
+    st.caption("Changes to this table auto-save, including deleted rows.")
+    if "considerations_table_sig" not in st.session_state:
+        st.session_state["considerations_table_sig"] = str(
+            pd.util.hash_pandas_object(rules_df.fillna("").astype(str), index=True).sum()
         )
+    edited_sig = str(pd.util.hash_pandas_object(edited_rules.fillna("").astype(str), index=True).sum())
+    if edited_sig != st.session_state["considerations_table_sig"]:
+        edited_rules.to_csv(CONSIDERATIONS_FILE, index=False)
+        st.session_state["considerations_table_sig"] = edited_sig
+        st.success("Saved data/schedule_considerations.csv")
+
+    st.download_button(
+        "Download Rules CSV",
+        data=edited_rules.to_csv(index=False),
+        file_name="schedule_considerations.csv",
+        mime="text/csv",
+    )
 
 
 def render_saved_schedules_tab(divisions: pd.DataFrame) -> None:
     st.subheader("Saved Schedules")
-    st.caption("Schedules saved from Schedule Builder.")
+    st.caption("One active schedule per division. Archive older versions for history.")
 
     table = load_saved_schedules_from_db()
     if table.empty:
         st.info("No saved schedules yet. Click 'Save Schedule' in Schedule Builder.")
     else:
-        shown = table[["schedule_id", "division", "weekends", "created_on"]].copy()
+        if not divisions.empty and "division_code" in divisions.columns:
+            allowed = set(divisions["division_code"].dropna().astype(str).tolist())
+            if allowed:
+                table = table[table["division"].astype(str).isin(allowed)].copy()
+
+        if table.empty:
+            st.info("No saved schedules found for the selected season.")
+            return
+
+        table["is_active"] = pd.to_numeric(table.get("is_active", 0), errors="coerce").fillna(0).astype(int)
+        table["status"] = table["is_active"].map({1: "Active", 0: "Archived"})
+        view_mode = st.selectbox(
+            "View",
+            options=["Active", "Archived", "All"],
+            index=0,
+            key="saved_schedules_view_mode",
+        )
+        if view_mode == "Active":
+            shown = table[table["is_active"] == 1].copy()
+        elif view_mode == "Archived":
+            shown = table[table["is_active"] == 0].copy()
+        else:
+            shown = table.copy()
+
+        shown = shown[["schedule_id", "division", "status", "weekends", "created_on", "archived_on"]].copy()
+        shown = shown.sort_values(["division", "status", "schedule_id"], ascending=[True, True, False]).reset_index(drop=True)
+        if shown.empty:
+            st.info(f"No schedules found for view: {view_mode}.")
+            return
 
         event = st.dataframe(
             shown,
@@ -2209,6 +2988,34 @@ def render_saved_schedules_tab(divisions: pd.DataFrame) -> None:
                 selected_schedule_id = int(shown.iloc[row_idx]["schedule_id"])
 
         if selected_schedule_id is not None:
+            selected_row = table[table["schedule_id"] == selected_schedule_id]
+            selected_is_active = False
+            selected_division = ""
+            if not selected_row.empty:
+                selected_is_active = int(selected_row.iloc[0].get("is_active", 0)) == 1
+                selected_division = str(selected_row.iloc[0].get("division", ""))
+
+            a1, a2, _ = st.columns([1.2, 1.2, 4.6])
+            with a1:
+                if selected_is_active:
+                    if st.button("Archive Schedule", key=f"archive_schedule_{selected_schedule_id}"):
+                        ok, msg = archive_schedule(selected_schedule_id, reason="Manually archived")
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                else:
+                    if st.button("Set Active Schedule", key=f"activate_schedule_{selected_schedule_id}"):
+                        if set_active_schedule(selected_schedule_id):
+                            st.success(f"Schedule {selected_schedule_id} is now active for {selected_division}.")
+                            st.rerun()
+                        else:
+                            st.error("Could not set active schedule.")
+            with a2:
+                status_text = "Active" if selected_is_active else "Archived"
+                st.caption(f"Selected status: {status_text}")
+
             st.write(f"Schedule Games (Schedule ID: {selected_schedule_id})")
             games = load_saved_schedule_games_from_db(selected_schedule_id)
             if games.empty:
@@ -2299,7 +3106,7 @@ def main() -> None:
     with tab2:
         render_schedule_considerations_tab(scoped_divisions, teams)
     with tab3:
-        render_division_builder(scoped_divisions, teams, venue_slots)
+        render_division_builder(scoped_divisions, teams, venue_slots, team_coaches)
     with tab4:
         render_saved_schedules_tab(scoped_divisions)
 
