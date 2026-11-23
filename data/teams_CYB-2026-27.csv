@@ -1,0 +1,39 @@
+team_id,division_code,draft_slot,coach_last_name,team_nickname,team_display_name,is_active
+B1-01,B1,1,IMERMAN,Gremlin University,01 - IMERMAN Gremlin University,1
+B1-02,B1,2,KLAM,Paul George Elite,02 - KLAM Paul George Elite,1
+B1-03,B1,3,HAFIF,The Crossovers,03 - HAFIF The Crossovers,1
+B1-04,B1,4,ROBLES,Ballers,04 - ROBLES Ballers,1
+B1-05,B1,5,TAYLOR,Swish,05 - TAYLOR Swish,1
+B1-06,B1,6,DEARDEN,Swish Kebabs,06 - DEARDEN Swish Kebabs,1
+B1-07,B1,7,ALALAY,Hoop Dreams,07 - ALALAY Hoop Dreams,1
+B1-08,B1,8,BROWN,Elite,08 - BROWN Elite,1
+B1-09,B1,9,PEREZ,The Playmakers,09 - PEREZ The Playmakers,1
+B1-10,B1,10,VILLAVICENCIO,Ball Out,10 - VILLAVICENCIO Ball Out,1
+B2-01,B2,1,EWALD,,01 - EWALD,1
+B2-02,B2,2,SHAY,,02 - SHAY,1
+B2-03,B2,3,MCALLASTER,,03 - MCALLASTER,1
+B2-04,B2,4,ROJAS,,04 - ROJAS,1
+B2-05,B2,5,CANTY,,05 - CANTY,1
+B2-06,B2,6,BEASLEY,,06 - BEASLEY,1
+B2-07,B2,7,RADCLIFFE,,07 - RADCLIFFE,1
+B2-08,B2,8,SAYAT,,08 - SAYAT,1
+B2-09,B2,9,STIMAC,,09 - STIMAC,1
+B2-10,B2,10,FERRERIA,,10 - FERRERIA,1
+B3-01,B3,1,DEPAK,Spartans,01 - DEPAK Spartans,1
+B3-02,B3,2,SHAY,Georgia Amoore Elite,02 - SHAY Georgia Amoore Elite,1
+B3-03,B3,3,STOCKHAM,Claremont Ballers,03 - STOCKHAM Claremont Ballers,1
+B3-04,B3,4,DAVIS,Dude Squad,04 - DAVIS Dude Squad,1
+B3-05,B3,5,LOPEZ,Goats,05 - LOPEZ Goats,1
+B3-06,B3,6,ROJAS,,06 - ROJAS,1
+B3-07,B3,7,BUCCOLA,Falcons,07 - BUCCOLA Falcons,1
+B3-08,B3,8,MOLINA,Spurs,08 - MOLINA Spurs,1
+B3-09,B3,9,CHAVEZ,Madballers,09 - CHAVEZ Madballers,1
+G1-01,G1,1,BABAIAN,,01 - BABAIAN,1
+G1-02,G1,2,GILES WHITE,,02 - GILES WHITE,1
+G1-03,G1,3,ROBLES,,03 - ROBLES,1
+G1-04,G1,4,MITCHELL,,04 - MITCHELL,1
+G2-01,G2,1,LOPEZ,Shooting Stars,01 - LOPEZ Shooting Stars,1
+G2-02,G2,2,TAYLOR,Sleighers,02 - TAYLOR Sleighers,1
+G2-03,G2,3,SPENCER,Black Mambas,03 - SPENCER Black Mambas,1
+G2-04,G2,4,VILLAVICENCIO,Elite8,04 - VILLAVICENCIO Elite8,1
+G2-05,G2,5,BAWEK-DIORIO,Valkyries,05 - BAWEK-DIORIO Valkyries,1

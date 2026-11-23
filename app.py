@@ -17,6 +17,25 @@ SAVED_SCHEDULES_FILE = DATA_DIR / "saved_schedules.csv"
 DB_FILE = DATA_DIR / "schedule_manager.db"
 PROGRAMS_FILE = DATA_DIR / "programs.csv"
 PROGRAM_DIVISIONS_FILE = DATA_DIR / "program_divisions.csv"
+SEASON_CHECKLIST_FILE = DATA_DIR / "season_checklist.csv"
+
+SEASON_CHECKLIST_ITEMS = [
+    ("team_counts", "Confirm the number of teams in each league", "Planning"),
+    ("gym_availability", "Gather gym dates, times, and blackout periods", "Planning"),
+    ("coach_availability", "Collect coach names and availability", "About 2–3 weeks in November"),
+    ("coach_requests", "Collect scheduling requests and preferred gyms", "About 2–3 weeks in November"),
+    ("team_assignments", "Confirm team names and the coach assigned to each team", "Before building the schedule"),
+    ("gym_assignments", "Assign leagues to gyms and set time blocks", "Before building the schedule"),
+    ("schedule_template", "Start from the standard schedule template", "Before building the schedule"),
+    ("place_games", "Place games into league and gym time slots", "Before publishing"),
+    ("validate_requests", "Check the draft against all scheduling requests", "Before publishing"),
+    ("adjust_conflicts", "Resolve conflicts by changing game times or gyms", "Before publishing"),
+    ("coach_conflicts", "Check that coaches in multiple leagues have no overlapping games", "Before publishing"),
+    ("upload_file", "Prepare the site upload CSV from the validated schedule", "Before upload"),
+    ("upload_fields", "Review round numbers, match dates, teams, start times, locations, and fields; manually correct Super Bowl Sunday dates and alternate gym details", "Before upload"),
+    ("upload_teams", "Add the season's teams to each league on the site", "Before schedule upload"),
+    ("upload_schedule", "Upload the season schedule to the site", "Around the third week of November"),
+]
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -323,6 +342,14 @@ def load_csv(name: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def load_program_csv(name: str, program_id: str) -> pd.DataFrame:
+    stem, suffix = Path(name).stem, Path(name).suffix
+    season_path = DATA_DIR / f"{stem}_{program_id}{suffix}"
+    if season_path.exists():
+        return pd.read_csv(season_path)
+    return load_csv(name)
+
+
 def apply_tooltip_position_css() -> None:
     # Keep native Streamlit help tooltip behavior, but bias placement to the right of the icon.
     st.markdown(
@@ -393,6 +420,92 @@ def divisions_for_program(divisions: pd.DataFrame, program_divisions: pd.DataFra
     return divisions[divisions["division_code"].astype(str).isin(scoped)].copy().reset_index(drop=True)
 
 
+def load_season_checklist(program_id: str) -> pd.DataFrame:
+    checklist = pd.DataFrame(
+        [
+            {
+                "task_id": task_id,
+                "task": task,
+                "timing": timing,
+                "complete": False,
+                "notes": "",
+            }
+            for task_id, task, timing in SEASON_CHECKLIST_ITEMS
+        ]
+    )
+    if not SEASON_CHECKLIST_FILE.exists():
+        return checklist
+
+    saved = pd.read_csv(SEASON_CHECKLIST_FILE).fillna("")
+    required = {"program_id", "task_id", "complete", "notes"}
+    if not required.issubset(saved.columns):
+        return checklist
+    saved = saved[saved["program_id"].astype(str) == str(program_id)].drop_duplicates("task_id", keep="last")
+    saved_by_id = saved.set_index(saved["task_id"].astype(str)).to_dict("index")
+    for ix, row in checklist.iterrows():
+        saved_row = saved_by_id.get(row["task_id"])
+        if saved_row:
+            checklist.at[ix, "complete"] = str(saved_row.get("complete", "")).strip().lower() in {"1", "true", "yes", "y"}
+            checklist.at[ix, "notes"] = str(saved_row.get("notes", ""))
+    return checklist
+
+
+def save_season_checklist(program_id: str, checklist: pd.DataFrame) -> None:
+    columns = ["program_id", "task_id", "task", "timing", "complete", "notes"]
+    if SEASON_CHECKLIST_FILE.exists():
+        existing = pd.read_csv(SEASON_CHECKLIST_FILE).fillna("")
+        existing = existing[existing["program_id"].astype(str) != str(program_id)] if "program_id" in existing.columns else pd.DataFrame(columns=columns)
+    else:
+        existing = pd.DataFrame(columns=columns)
+    updated = checklist.copy()
+    updated.insert(0, "program_id", str(program_id))
+    for col in columns:
+        if col not in existing.columns:
+            existing[col] = ""
+        if col not in updated.columns:
+            updated[col] = ""
+    pd.concat([existing[columns], updated[columns]], ignore_index=True).to_csv(SEASON_CHECKLIST_FILE, index=False)
+
+
+def render_season_checklist(programs: pd.DataFrame, current_program_id: str) -> None:
+    all_program_ids = programs["program_id"].dropna().astype(str).tolist()
+    program_names = {
+        str(row["program_id"]): str(row["program_name"])
+        for _, row in programs.iterrows()
+    }
+    if not all_program_ids:
+        st.info("Create a season before using its checklist.")
+        return
+    initial_index = all_program_ids.index(current_program_id) if current_program_id in all_program_ids else 0
+    program_id = st.selectbox(
+        "Checklist season",
+        options=all_program_ids,
+        index=initial_index,
+        format_func=lambda value: program_names.get(str(value), str(value)),
+        key="season_checklist_program_id",
+    )
+    program_name = program_names.get(program_id, program_id)
+    st.subheader(f"{program_name} Checklist")
+    st.caption("Track the planning, schedule review, and site upload steps for this season.")
+    checklist = load_season_checklist(program_id)
+    edited = st.data_editor(
+        checklist,
+        hide_index=True,
+        use_container_width=True,
+        key=f"season_checklist_{program_id}",
+        column_config={
+            "task_id": None,
+            "task": st.column_config.TextColumn("Checklist item", disabled=True),
+            "timing": st.column_config.TextColumn("Guide timing", disabled=True),
+            "complete": st.column_config.CheckboxColumn("Done"),
+            "notes": st.column_config.TextColumn("Notes"),
+        },
+    )
+    if st.button("Save checklist", key=f"save_season_checklist_{program_id}"):
+        save_season_checklist(program_id, edited)
+        st.success("Season checklist saved.")
+
+
 def normalize_time(value: str) -> str:
     if pd.isna(value):
         return ""
@@ -412,13 +525,16 @@ def normalize_time(value: str) -> str:
 
 def prep_game_days(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    expected = ["game_date", "day_of_week", "enabled", "notes"]
+    expected = ["game_date", "day_of_week", "enabled", "notes", "week_no"]
     for col in expected:
         if col not in out.columns:
             out[col] = ""
     out["game_date"] = pd.to_datetime(out["game_date"], errors="coerce").dt.date.astype("string")
     out["enabled"] = pd.to_numeric(out["enabled"], errors="coerce").fillna(0).astype(int)
     out["day_of_week"] = out["day_of_week"].fillna("").astype(str).str.slice(0, 3).str.title()
+    if out["week_no"].fillna("").astype(str).str.strip().eq("").all():
+        out["week_no"] = range(1, len(out) + 1)
+    out["week_no"] = pd.to_numeric(out["week_no"], errors="coerce").fillna(0).astype(int)
     return out[expected]
 
 
@@ -430,10 +546,14 @@ def prep_venue_slots(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_dated_slots(game_days: pd.DataFrame, venue_slots: pd.DataFrame) -> pd.DataFrame:
+def build_dated_slots(
+    game_days: pd.DataFrame,
+    venue_slots: pd.DataFrame,
+    special_slots: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     enabled = game_days[game_days["enabled"] == 1].copy()
     if enabled.empty:
-        return pd.DataFrame(columns=["game_date", "day_of_week", "venue_id", "start_time", "slot_key"])
+        return pd.DataFrame(columns=["game_date", "day_of_week", "week_no", "venue_id", "start_time", "division_code", "slot_key"])
 
     enabled["game_date"] = pd.to_datetime(enabled["game_date"], errors="coerce")
     enabled = enabled.dropna(subset=["game_date"])
@@ -442,7 +562,26 @@ def build_dated_slots(game_days: pd.DataFrame, venue_slots: pd.DataFrame) -> pd.
 
     slots = venue_slots[venue_slots["is_available"] == 1].copy()
     merged = enabled.merge(slots, on="day_of_week", how="inner")
-    merged = merged[["game_date", "day_of_week", "venue_id", "start_time"]].copy()
+    if "assigned_division_code" not in merged.columns:
+        merged["assigned_division_code"] = ""
+    merged = merged[["game_date", "day_of_week", "week_no", "venue_id", "start_time", "assigned_division_code"]].copy()
+    merged = merged.rename(columns={"assigned_division_code": "division_code"})
+
+    if special_slots is not None and not special_slots.empty:
+        special = special_slots.copy()
+        needed = {"game_date", "venue_id", "start_time", "division_code"}
+        if needed.issubset(special.columns):
+            special["game_date"] = pd.to_datetime(special["game_date"], errors="coerce").dt.date.astype("string")
+            special["start_time"] = special["start_time"].map(normalize_time)
+            if "day_of_week" not in special.columns:
+                special["day_of_week"] = pd.to_datetime(special["game_date"], errors="coerce").dt.strftime("%a")
+            special["day_of_week"] = special["day_of_week"].fillna("").astype(str).str.slice(0, 3).str.title()
+            special = special.merge(enabled[["game_date", "week_no"]], on="game_date", how="inner", suffixes=("", "_calendar"))
+            special = special[["game_date", "day_of_week", "week_no", "venue_id", "start_time", "division_code"]]
+            special_dates = set(special["game_date"].astype(str))
+            merged = merged[~merged["game_date"].astype(str).isin(special_dates)]
+            merged = pd.concat([merged, special], ignore_index=True)
+
     merged["slot_key"] = merged["game_date"] + "|" + merged["start_time"] + "|" + merged["venue_id"]
     return merged.sort_values(["game_date", "start_time", "venue_id"]).reset_index(drop=True)
 
@@ -527,14 +666,14 @@ def round_robin_pairs(team_ids: list[str]) -> list[list[tuple[str, str]]]:
     return rounds
 
 
-def build_round_plan(teams: pd.DataFrame, dates: list[str]) -> list[dict]:
+def build_round_plan(teams: pd.DataFrame, week_numbers: list[int]) -> list[dict]:
     plan = []
     for division_code, g in teams.groupby("division_code"):
         team_ids = sorted(g["team_id"].tolist())
         rounds = round_robin_pairs(team_ids)
         if not rounds:
             continue
-        for week_ix, game_date in enumerate(dates):
+        for week_ix, week_no in enumerate(week_numbers):
             current_round = rounds[week_ix % len(rounds)]
             for match_ix, (a, b) in enumerate(current_round):
                 if week_ix % 2 == 0:
@@ -544,7 +683,7 @@ def build_round_plan(teams: pd.DataFrame, dates: list[str]) -> list[dict]:
                 plan.append(
                     {
                         "week_ix": week_ix,
-                        "game_date": game_date,
+                        "week_no": int(week_no),
                         "division_code": division_code,
                         "home_team_id": home,
                         "away_team_id": away,
@@ -552,6 +691,23 @@ def build_round_plan(teams: pd.DataFrame, dates: list[str]) -> list[dict]:
                     }
                 )
     return plan
+
+
+def schedule_request_applies(rule: pd.Series, slot: pd.Series) -> bool:
+    applies_to = str(rule.get("applies_to", "All games")).strip().lower()
+    dates = parse_csv_list(str(rule.get("specific_dates", "")))
+    weekdays = [day.title()[:3] for day in parse_csv_list(str(rule.get("weekdays", "")))]
+    game_date = str(slot.get("game_date", ""))
+    day = str(slot.get("day_of_week", "")).title()[:3]
+    if applies_to == "specific dates" and dates:
+        return game_date in dates
+    if applies_to == "specific weekdays" and weekdays:
+        return day in weekdays
+    if applies_to == "specific dates and weekdays":
+        return (not dates or game_date in dates) and (not weekdays or day in weekdays)
+    if applies_to == "all games except specific dates":
+        return game_date not in dates
+    return True
 
 
 def choose_best_slot(
@@ -564,42 +720,90 @@ def choose_best_slot(
     primary_venue: dict[str, str],
     avoid_slots: set[tuple[str, str, str, str]],
     preferred_slots: set[tuple[str, str, str, str]],
-) -> tuple[str | None, str | None]:
+    schedule_constraints: pd.DataFrame,
+) -> tuple[str | None, str | None, str | None]:
     best = None
     best_score = 10**9
+    candidate_times = sorted(
+        {
+            normalize_time(str(value))
+            for value in slots_for_date["start_time"].dropna().tolist()
+        }
+    )
+    max_time_index = max(0, len(candidate_times) - 1)
 
     for _, slot in slots_for_date.iterrows():
+        slot_division = str(slot.get("division_code", "")).strip()
+        division = str(game["division_code"])
+        if slot_division and slot_division != division:
+            continue
         venue_id = str(slot["venue_id"])
         start_time = str(slot["start_time"])
-        game_date = str(game["game_date"])
+        game_date = str(slot["game_date"])
         slot_key = f"{game_date}|{start_time}|{venue_id}"
         if slot_key in used_slots:
             continue
 
         score = 0
-        division = str(game["division_code"])
-
         if primary_venue.get(division) and primary_venue[division] != venue_id:
             score += 30
 
-        pref_key = (division, venue_id, "Sun", start_time)
+        pref_key = (division, venue_id, str(slot.get("day_of_week", "Sun")), start_time)
         if pref_key in avoid_slots:
             score += 25
         if pref_key in preferred_slots:
             score -= 10
 
+        time_index = candidate_times.index(start_time) if start_time in candidate_times else 0
+        game_team_ids = [str(game.get("home_team_id", "")).strip(), str(game.get("away_team_id", "")).strip()]
+        team_rules = schedule_constraints[
+            schedule_constraints["team_id"].astype(str).str.strip().isin(game_team_ids)
+        ] if not schedule_constraints.empty and "team_id" in schedule_constraints.columns else pd.DataFrame()
+        for _, rule_row in team_rules.iterrows():
+            if str(rule_row.get("status", "Active")).strip().lower() != "active" or not schedule_request_applies(rule_row, slot):
+                continue
+            rule_name = str(rule_row.get("time_rule", "")).strip().lower()
+            value = str(rule_row.get("time_value", "")).strip()
+            if rule_name == "prefer earlier games":
+                score += time_index * 100
+            elif rule_name == "prefer later games":
+                score += (max_time_index - time_index) * 100
+            elif rule_name == "prefer specific slot(s)":
+                preferred_times = {normalize_time(item) for item in parse_csv_list(value)}
+                score += -100 if start_time in preferred_times else 200
+            elif rule_name == "avoid specific slot(s)":
+                avoided_times = {normalize_time(item) for item in parse_csv_list(value)}
+                if start_time in avoided_times:
+                    score += 300
+            elif rule_name == "no games before time":
+                cutoff = normalize_time(value)
+                if cutoff and start_time < cutoff:
+                    score += 10000
+            elif rule_name == "no games after time":
+                cutoff = normalize_time(value)
+                if cutoff and start_time > cutoff:
+                    score += 10000
+            elif rule_name == "between time window" and "-" in value:
+                left, right = value.split("-", 1)
+                if not (normalize_time(left) <= start_time <= normalize_time(right)):
+                    score += 1000
+
         for team_id in [game["home_team_id"], game["away_team_id"]]:
             if (team_id, game_date, start_time) in team_time:
-                score += 1000
+                score = 10**9
+                break
             for coach_id in team_to_coaches.get(team_id, []):
                 if (coach_id, game_date, start_time) in coach_time:
-                    score += 1000
+                    score = 10**9
+                    break
+            if score >= 10**9:
+                break
 
         if score < best_score:
             best_score = score
-            best = (venue_id, start_time)
+            best = (venue_id, start_time, game_date)
 
-    return best if best else (None, None)
+    return best if best else (None, None, None)
 
 
 def generate_schedule(
@@ -613,14 +817,14 @@ def generate_schedule(
     if teams.empty or dated_slots.empty:
         return empty_schedule_template(), pd.DataFrame([{"reason": "Missing teams or dated slots."}])
 
-    dates = sorted(dated_slots["game_date"].dropna().astype(str).unique().tolist())
+    week_numbers = sorted(pd.to_numeric(dated_slots["week_no"], errors="coerce").dropna().astype(int).unique().tolist())
     if max_weeks > 0:
-        dates = dates[:max_weeks]
+        week_numbers = week_numbers[:max_weeks]
 
-    if not dates:
+    if not week_numbers:
         return empty_schedule_template(), pd.DataFrame([{"reason": "No enabled game dates found."}])
 
-    plan = build_round_plan(teams, dates)
+    plan = build_round_plan(teams, week_numbers)
     if not plan:
         return empty_schedule_template(), pd.DataFrame([{"reason": "No matchups generated."}])
 
@@ -632,6 +836,10 @@ def generate_schedule(
     if not division_venue_prefs.empty:
         p = division_venue_prefs[division_venue_prefs["is_primary"] == 1]
         primary_venue = p.set_index("division_code")["venue_id"].to_dict()
+
+    schedule_constraints = load_or_default_considerations()
+    if schedule_constraints.empty:
+        schedule_constraints = pd.DataFrame(columns=["team_id", "time_rule", "time_value", "status", "applies_to", "specific_dates", "weekdays"])
 
     slot_pref = division_slot_prefs.copy()
     if not slot_pref.empty:
@@ -659,11 +867,11 @@ def generate_schedule(
     plan_df = pd.DataFrame(plan).sort_values(["week_ix", "division_code", "match_ix"]).reset_index(drop=True)
 
     for _, game in plan_df.iterrows():
-        game_date = str(game["game_date"])
-        day_slots = dated_slots[dated_slots["game_date"] == game_date]
-        venue_id, start_time = choose_best_slot(
+        week_no = int(game["week_no"])
+        week_slots = dated_slots[pd.to_numeric(dated_slots["week_no"], errors="coerce") == week_no]
+        venue_id, start_time, game_date = choose_best_slot(
             game.to_dict(),
-            day_slots,
+            week_slots,
             used_slots,
             team_time,
             coach_time,
@@ -671,13 +879,14 @@ def generate_schedule(
             primary_venue,
             avoid_slots,
             preferred_slots,
+            schedule_constraints,
         )
 
         if not venue_id:
             unscheduled.append(
                 {
                     "division_code": game["division_code"],
-                    "game_date": game_date,
+                    "week_no": week_no,
                     "home_team_id": game["home_team_id"],
                     "away_team_id": game["away_team_id"],
                     "reason": "No viable slot found.",
@@ -695,6 +904,7 @@ def generate_schedule(
         scheduled_rows.append(
             {
                 "game_date": game_date,
+                "week_no": week_no,
                 "start_time": start_time,
                 "venue_id": venue_id,
                 "division_code": game["division_code"],
@@ -778,11 +988,20 @@ def validate_schedule(
             if str(row["division_code"]).strip() and str(row["division_code"]).strip() != h_div:
                 add("division_mismatch", int(row["row"]), f"division_code does not match team division ({h_div}).", "warning")
 
-    slot_set = set(dated_slots["slot_key"].tolist()) if not dated_slots.empty else set()
+    slot_divisions = (
+        dated_slots.groupby("slot_key")["division_code"].apply(lambda values: set(values.fillna("").astype(str).str.strip())).to_dict()
+        if not dated_slots.empty and "division_code" in dated_slots.columns
+        else {}
+    )
     df["slot_key"] = df["game_date"] + "|" + df["start_time"] + "|" + df["venue_id"].astype(str)
     for _, row in df.iterrows():
-        if slot_set and row["slot_key"] not in slot_set:
-            add("slot_not_in_availability", int(row["row"]), "Slot is not in enabled game days + venue availability.", "warning")
+        allowed_divisions = slot_divisions.get(row["slot_key"])
+        row_division = str(row.get("division_code", "")).strip()
+        if slot_divisions and (
+            allowed_divisions is None
+            or ("" not in allowed_divisions and row_division not in allowed_divisions)
+        ):
+            add("slot_not_in_availability", int(row["row"]), "Slot is not available for this division on the selected date.", "warning")
 
     dup_slots = df[df.duplicated(subset=["game_date", "start_time", "venue_id"], keep=False)]
     for _, row in dup_slots.iterrows():
@@ -882,7 +1101,7 @@ def build_friendly_export(schedule: pd.DataFrame, teams: pd.DataFrame, venues: p
         location, field = split_location_field(str(r["venue_id"]))
         rows.append(
             {
-                "RoundNo": round_map.get(date_str, ""),
+                "RoundNo": r.get("week_no", round_map.get(date_str, "")),
                 "MatchDate": date_str,
                 "StartTime": r["start_time"],
                 "Division": r.get("division_code", ""),
@@ -968,6 +1187,8 @@ def consideration_applies_to_builder(row: pd.Series) -> bool:
     applies_to = str(row.get("applies_to", "")).strip().lower()
     weekdays = [d.title()[:3] for d in parse_csv_list(str(row.get("weekdays", "")))]
     specific_dates = parse_csv_list(str(row.get("specific_dates", "")))
+    if applies_to == "all games except specific dates":
+        return False  # The weekly grid has no dates; use the Dated Scheduler for this rule.
     if not applies_to or applies_to == "all games":
         return True
     if applies_to == "specific weekdays":
@@ -2334,13 +2555,18 @@ def render_workbench(
     team_coaches: pd.DataFrame,
     division_venue_prefs: pd.DataFrame,
     division_slot_prefs: pd.DataFrame,
+    program_id: str,
 ) -> None:
     st.subheader("General Scheduler Workbench")
 
     st.subheader("1) Game Dates")
-    uploaded_days = st.file_uploader("Game day input CSV", type=["csv"], key="days_upload")
+    game_days_file = DATA_DIR / f"game_day_inputs_{program_id}.csv"
+    special_slots_file = DATA_DIR / f"special_venue_slots_{program_id}.csv"
+    uploaded_days = st.file_uploader("Game day input CSV", type=["csv"], key=f"days_upload_{program_id}")
     if uploaded_days is not None:
         game_days = pd.read_csv(uploaded_days)
+    elif game_days_file.exists():
+        game_days = pd.read_csv(game_days_file)
     elif (DATA_DIR / "game_day_inputs.csv").exists():
         game_days = pd.read_csv(DATA_DIR / "game_day_inputs.csv")
     else:
@@ -2348,18 +2574,19 @@ def render_workbench(
         game_days = pd.read_csv(example_path) if example_path.exists() else pd.DataFrame(columns=["game_date", "day_of_week", "enabled", "notes"])
 
     game_days = prep_game_days(game_days)
-    game_days = st.data_editor(game_days, num_rows="dynamic", use_container_width=True, key="game_days_editor")
-    if st.button("Save game_day_inputs.csv"):
-        game_days.to_csv(DATA_DIR / "game_day_inputs.csv", index=False)
-        st.success("Saved data/game_day_inputs.csv")
+    game_days = st.data_editor(game_days, num_rows="dynamic", use_container_width=True, key=f"game_days_editor_{program_id}")
+    if st.button("Save season game dates", key=f"save_game_days_{program_id}"):
+        game_days.to_csv(game_days_file, index=False)
+        st.success(f"Saved {game_days_file.name}")
 
-    dated_slots = build_dated_slots(game_days, venue_slots)
+    special_slots = pd.read_csv(special_slots_file) if special_slots_file.exists() else pd.DataFrame()
+    dated_slots = build_dated_slots(game_days, venue_slots, special_slots)
     st.subheader("2) Dated Available Slots")
     st.dataframe(dated_slots, use_container_width=True, height=220)
 
     st.subheader("3) Generate Draft Schedule")
-    enabled_dates = sorted(game_days[game_days["enabled"] == 1]["game_date"].dropna().astype(str).tolist())
-    max_weeks_default = len(enabled_dates) if enabled_dates else 1
+    enabled_weeks = sorted(pd.to_numeric(game_days.loc[game_days["enabled"] == 1, "week_no"], errors="coerce").dropna().astype(int).unique().tolist())
+    max_weeks_default = len(enabled_weeks) if enabled_weeks else 1
     weeks_to_schedule = st.number_input("Weeks to schedule", min_value=1, max_value=max(1, max_weeks_default), value=max_weeks_default, step=1)
 
     if st.button("Auto-generate draft schedule"):
@@ -2371,21 +2598,24 @@ def render_workbench(
             division_slot_prefs,
             max_weeks=int(weeks_to_schedule),
         )
-        st.session_state.schedule_df = draft
-        st.session_state.unscheduled_df = unscheduled
+        st.session_state[f"schedule_df_{program_id}"] = draft
+        st.session_state[f"unscheduled_df_{program_id}"] = unscheduled
         st.success("Draft schedule generated.")
 
-    if "unscheduled_df" in st.session_state and not st.session_state.unscheduled_df.empty:
-        st.warning(f"Unscheduled games: {len(st.session_state.unscheduled_df)}")
-        st.dataframe(st.session_state.unscheduled_df, use_container_width=True, height=140)
+    unscheduled_key = f"unscheduled_df_{program_id}"
+    if unscheduled_key in st.session_state and not st.session_state[unscheduled_key].empty:
+        st.warning(f"Unscheduled games: {len(st.session_state[unscheduled_key])}")
+        st.dataframe(st.session_state[unscheduled_key], use_container_width=True, height=140)
 
     st.subheader("4) Build or Import Schedule")
-    schedule_upload = st.file_uploader("Schedule CSV", type=["csv"], key="schedule_upload")
+    schedule_upload = st.file_uploader("Schedule CSV", type=["csv"], key=f"schedule_upload_{program_id}")
 
     if schedule_upload is not None:
         schedule_df = pd.read_csv(schedule_upload)
-    elif "schedule_df" in st.session_state:
-        schedule_df = st.session_state.schedule_df
+    elif f"schedule_df_{program_id}" in st.session_state:
+        schedule_df = st.session_state[f"schedule_df_{program_id}"]
+    elif (DATA_DIR / f"schedule_{program_id}.csv").exists():
+        schedule_df = pd.read_csv(DATA_DIR / f"schedule_{program_id}.csv")
     elif (DATA_DIR / "schedule.csv").exists():
         schedule_df = pd.read_csv(DATA_DIR / "schedule.csv")
     else:
@@ -2399,7 +2629,7 @@ def render_workbench(
         schedule_df,
         num_rows="dynamic",
         use_container_width=True,
-        key="schedule_editor",
+        key=f"schedule_editor_{program_id}",
         column_config={
             "division_code": st.column_config.SelectboxColumn("division_code", options=division_ids),
             "venue_id": st.column_config.SelectboxColumn("venue_id", options=venue_ids),
@@ -2407,13 +2637,13 @@ def render_workbench(
             "away_team_id": st.column_config.SelectboxColumn("away_team_id", options=team_ids),
         },
     )
-    st.session_state.schedule_df = edited_schedule
+    st.session_state[f"schedule_df_{program_id}"] = edited_schedule
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("Save schedule to data/schedule.csv"):
-            edited_schedule.to_csv(DATA_DIR / "schedule.csv", index=False)
-            st.success("Saved data/schedule.csv")
+        if st.button("Save season schedule", key=f"save_schedule_{program_id}"):
+            edited_schedule.to_csv(DATA_DIR / f"schedule_{program_id}.csv", index=False)
+            st.success(f"Saved schedule_{program_id}.csv")
     with c2:
         st.download_button("Download raw schedule CSV", data=edited_schedule.to_csv(index=False), file_name="schedule.csv", mime="text/csv")
 
@@ -2812,6 +3042,7 @@ def build_consideration_summary(d: dict) -> str:
 def render_schedule_considerations_tab(divisions: pd.DataFrame, teams: pd.DataFrame) -> None:
     st.subheader("Constraints")
     st.caption("Track coach requests and special scheduling constraints to consider during schedule creation.")
+    st.caption("Use the Dated Scheduler to apply requests that depend on specific calendar dates.")
     division_codes = sorted(divisions["division_code"].dropna().astype(str).tolist()) if not divisions.empty else []
     st.write("Create Constraint")
     with st.form("create_constraint_form"):
@@ -2838,7 +3069,7 @@ def render_schedule_considerations_tab(divisions: pd.DataFrame, teams: pd.DataFr
                 team_name = str(selected_team_row.iloc[0].get("team_display_name", team_id))
                 coach_name = str(selected_team_row.iloc[0].get("coach_last_name", "")).strip()
 
-        apply_options = ["All games", "Specific dates", "Specific weekdays", "Specific dates and weekdays"]
+        apply_options = ["All games", "All games except specific dates", "Specific dates", "Specific weekdays", "Specific dates and weekdays"]
         time_rule_options = [
             "Prefer later games",
             "Prefer earlier games",
@@ -2860,7 +3091,7 @@ def render_schedule_considerations_tab(divisions: pd.DataFrame, teams: pd.DataFr
 
         specific_dates = ""
         weekdays: list[str] = []
-        if applies_to in {"Specific dates", "Specific dates and weekdays"}:
+        if applies_to in {"All games except specific dates", "Specific dates", "Specific dates and weekdays"}:
             specific_dates = st.text_input("Specific date(s) (comma-separated YYYY-MM-DD)")
         if applies_to in {"Specific weekdays", "Specific dates and weekdays"}:
             weekday_options = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
@@ -3059,10 +3290,8 @@ def main() -> None:
     init_db()
 
     divisions = load_csv("divisions.csv")
-    teams = load_csv("teams.csv")
     venues = load_csv("venues.csv")
     venue_slots = prep_venue_slots(load_csv("venue_slots.csv"))
-    team_coaches = load_csv("team_coaches.csv")
     division_venue_prefs = load_csv("division_venue_preferences.csv")
     division_slot_prefs = load_csv("division_slot_preferences.csv")
     programs, program_divisions = ensure_program_models(divisions)
@@ -3095,12 +3324,14 @@ def main() -> None:
     )
 
     scoped_divisions = divisions_for_program(divisions, program_divisions, selected_program_id)
+    teams = load_program_csv("teams.csv", selected_program_id)
+    team_coaches = load_program_csv("team_coaches.csv", selected_program_id)
 
-    tab0, tab1, tab2, tab3, tab4 = st.tabs(
-        ["Divisions", "Venues", "Constraints", "Schedule Builder", "Saved Schedules"]
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["Divisions", "Venues", "Constraints", "Schedule Builder", "Dated Scheduler", "Saved Schedules", "Season Checklist"]
     )
     with tab0:
-        render_teams_tab(teams, divisions)
+        render_teams_tab(teams, scoped_divisions)
     with tab1:
         render_venues_tab(venues, venue_slots, scoped_divisions)
     with tab2:
@@ -3108,7 +3339,20 @@ def main() -> None:
     with tab3:
         render_division_builder(scoped_divisions, teams, venue_slots, team_coaches)
     with tab4:
+        render_workbench(
+            scoped_divisions,
+            teams,
+            venues,
+            venue_slots,
+            team_coaches,
+            division_venue_prefs,
+            division_slot_prefs,
+            selected_program_id,
+        )
+    with tab5:
         render_saved_schedules_tab(scoped_divisions)
+    with tab6:
+        render_season_checklist(programs, selected_program_id)
 
 
 if __name__ == "__main__":

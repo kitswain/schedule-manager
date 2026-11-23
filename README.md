@@ -36,6 +36,13 @@ Open: [http://localhost:8501](http://localhost:8501)
 - validation report CSV
 - friendly upload CSV (`schedule_friendly_export.csv`)
 
+### Dated Scheduler
+
+Use the Dated Scheduler tab for season dates and dated availability. Season calendars use
+`data/game_day_inputs_<program_id>.csv` with a `week_no` column; dates with the same week number
+are treated as one round. Optional one-off availability is stored in
+`data/special_venue_slots_<program_id>.csv` and overrides the recurring gym slots on those dates.
+
 ## Data files
 
 - Core model: `data/divisions.csv`, `data/teams.csv`, `data/coaches.csv`, `data/venues.csv`
